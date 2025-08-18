@@ -129,7 +129,7 @@ except Exception as e:
 
 # --- 3. Flask 서버 설정 ---
 app = Flask(__name__)
-CORS(app, resources={r"/analyze": {"origins": "*"}})  # 개발 편의를 위해 모든 출처 허용
+CORS(app, resources={r"/api/analyze": {"origins": "*"}})  # 개발 편의를 위해 모든 출처 허용
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
@@ -140,7 +140,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 def health_check():
     return "✅ Knock AI 서버가 정상적으로 실행 중입니다!"
 
-@app.route('/analyze', methods=['POST'])
+@app.route('/api/analyze', methods=['POST'])
 def analyze_pdf_endpoint():
     if not loaded_model:
         return jsonify({"error": "서버에 모델이 로드되지 않았습니다."}), 500
