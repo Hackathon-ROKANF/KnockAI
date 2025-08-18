@@ -160,6 +160,12 @@ def analyze_pdf_endpoint():
         features_data = parse_register_info_detailed(pdf_text)
         test_df = pd.DataFrame([features_data])
 
+        # 2. PDF 유효성 검사
+        if "등기사항전부증명서" not in pdf_text:
+            os.remove(save_path)  # 검증 실패 시 임시 파일 즉시 삭제
+            return jsonify({"error": "올바른 등기부등본 파일이 아닙니다."}), 400
+        # ---------------------------
+
         # 2. 예측을 위한 데이터 전처리 (학습 구조와 동일하게)
         processed_df = pd.DataFrame(columns=training_columns, index=test_df.index)
         common_cols = [col for col in test_df.columns if col in processed_df.columns]
