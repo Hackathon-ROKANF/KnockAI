@@ -136,6 +136,9 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
+@app.route('/')
+def health_check():
+    return "✅ Knock AI 서버가 정상적으로 실행 중입니다!"
 
 @app.route('/analyze', methods=['POST'])
 def analyze_pdf_endpoint():
