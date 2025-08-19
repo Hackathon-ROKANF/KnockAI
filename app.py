@@ -49,7 +49,7 @@ def parse_register_info_detailed(text):
         '전입_가능여부': True, '우선변제권_여부': True, '주소': None, '전세가': None,
         '매매가': None, '전세가율': None, '과거_매매가': None, '과거_전세가': None, '과거_전세가율': None,
     }
-    addr_match = re.search(r'\[\s*집합건물\s*\]\s*(.+?)\n', text)
+    addr_match = re.search(r'\[\s*(?:건물|집합건물)\s*\]\s*(.+?)\n', text)
     if addr_match: features['주소'] = addr_match.group(1).strip()
     building_type_list = ['아파트', '빌라', '오피스텔', '다세대주택', '단독주택', '연립주택', '다가구주택']
     features['건축물_유형'] = '기타'
