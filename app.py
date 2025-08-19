@@ -5,14 +5,14 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import pickle
-import shap
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+from scipy import stats  # [ ✨ 핵심 추가 ✨ ] 백분위 계산을 위해 추가
 
 
 # --- 1. PDF 분석 로직 (기존과 동일) ---
-
+# (PDF 텍스트 추출 및 피처 파싱 함수들은 수정할 필요가 없으므로 그대로 둡니다)
 def korean_to_int(kstr):
     if not kstr: return 0
     kstr = str(kstr).replace(",", "").replace(" ", "").strip()
@@ -115,30 +115,86 @@ def parse_register_info_detailed(text):
     return features
 
 
-# --- 2. 모델 및 메타데이터 로드 ---
+# --- 2. [ ✨ 핵심 수정 ✨ ] 모델 및 관련 데이터 로드 ---
 try:
     with open('real_estate_model.pkl', 'rb') as f:
         saved_model_data = pickle.load(f)
+
     loaded_model = saved_model_data['model']
     training_columns = saved_model_data['columns']
     training_dtypes = saved_model_data['dtypes']
-    print("✅ 모델이 성공적으로 로드되었습니다.")
+    train_scores = saved_model_data.get('train_scores')  # 백분위 계산을 위한 기준 점수표
+    print("✅ 모델과 관련 데이터가 성공적으로 로드되었습니다.")
+
 except Exception as e:
     print(f"❌ 모델 로딩 실패: {e}")
     loaded_model = None
+    train_scores = None  # 로딩 실패 시 None으로 초기화
 
-# --- 3. Flask 서버 설정 ---
+
+# --- 3. [ ✨ 핵심 추가 ✨ ] 규칙 기반 분석 로직 ---
+
+def generate_rule_based_summary(data_row, prediction_result):
+    """입력 데이터의 값을 바탕으로 위험/안전 요인을 찾아 문장으로 요약합니다."""
+    risk_factors = []
+    safe_factors = []
+
+    # --- 위험 요인 규칙 ---
+    if data_row.get('우선변제권_여부') == False:
+        risk_factors.append("'우선변제권' 확보 불확실")
+    if data_row.get('선순위_채권_존재여부') == True:
+        risk_factors.append("'선순위 채권' 존재")
+    if data_row.get('압류_가압류_개수', 0) > 0:
+        risk_factors.append(f"'압류/가압류' ({int(data_row.get('압류_가압류_개수', 0))}건) 존재")
+    if data_row.get('신탁_등기여부') == True:
+        risk_factors.append("'신탁 등기' 존재")
+    if data_row.get('전입_가능여부') == False:
+        risk_factors.append("'전입 불가' 상태")
+
+    past_price = data_row.get('과거_매매가', 0)
+    past_jeonse = data_row.get('과거_전세가', 0)
+    if past_price > 0 and past_jeonse > 0:
+        jeonse_ratio = (past_jeonse / past_price) * 100
+        if jeonse_ratio > 80:
+            risk_factors.append(f"높은 과거 전세가율 ({jeonse_ratio:.0f}%)")
+
+    # --- 안전 요인 규칙 ---
+    if not risk_factors:
+        safe_factors.append("등기부등본상 특이사항 없음")
+    if data_row.get('압류_가압류_개수', 0) == 0:
+        safe_factors.append("'압류/가압류' 없음")
+
+    # --- [ ✨ 핵심 수정 ✨ ] 최종 요약 문장 생성 시 '\\n' 대신 띄어쓰기 사용 ---
+    summary_parts = []
+    if prediction_result == 1: # '위험'으로 예측된 경우
+        summary_parts.append("이 등기부등본은 '위험'으로 예측됩니다.")
+        if risk_factors:
+            summary_parts.append(f"주된 위험 요인: {', '.join(risk_factors)}.")
+
+    else: # '안전'으로 예측된 경우
+        summary_parts.append("이 등기부등본은 '안전'으로 예측됩니다.")
+        if safe_factors:
+            summary_parts.append(f"주된 안전 요인: {', '.join(safe_factors)}.")
+        if risk_factors:
+             summary_parts.append(f"주의할 요인: {', '.join(risk_factors)}.")
+
+    return " ".join(summary_parts) # 리스트의 각 부분을 띄어쓰기로 합쳐서 한 줄로 반환
+
+
+# --- 4. Flask 서버 설정 ---
 app = Flask(__name__)
-CORS(app, resources={r"/api/analyze": {"origins": "*"}})  # 개발 편의를 위해 모든 출처 허용
+CORS(app, resources={r"/api/analyze": {"origins": "*"}})
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
+
 @app.route('/')
 def health_check():
-    return "✅ Knock AI 서버가 정상적으로 실행 중입니다!"
+    return "✅ Knock AI (One-Class SVM) 서버가 정상적으로 실행 중입니다!"
+
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze_pdf_endpoint():
@@ -160,13 +216,12 @@ def analyze_pdf_endpoint():
         features_data = parse_register_info_detailed(pdf_text)
         test_df = pd.DataFrame([features_data])
 
-        # 2. PDF 유효성 검사
+        # PDF 유효성 검사
         if "등기사항전부증명서" not in pdf_text:
-            os.remove(save_path)  # 검증 실패 시 임시 파일 즉시 삭제
+            os.remove(save_path)
             return jsonify({"error": "올바른 등기부등본 파일이 아닙니다."}), 400
-        # ---------------------------
 
-        # 2. 예측을 위한 데이터 전처리 (학습 구조와 동일하게)
+        # 2. 예측을 위한 데이터 전처리
         processed_df = pd.DataFrame(columns=training_columns, index=test_df.index)
         common_cols = [col for col in test_df.columns if col in processed_df.columns]
         processed_df[common_cols] = test_df[common_cols]
@@ -181,64 +236,35 @@ def analyze_pdf_endpoint():
                             {'true': True, 'false': False, 'nan': pd.NA}
                         ).astype('boolean')
 
-        # 3. 예측 수행
-        prediction = loaded_model.predict(processed_df)[0]
-        prediction_proba = loaded_model.predict_proba(processed_df)[0]
-        risk_probability = prediction_proba[1]
+        # [ ✨ 핵심 수정 ✨ ] 3. One-Class SVM으로 예측 수행
+        prediction = loaded_model.predict(processed_df)[0]  # 1 또는 -1 반환
+        risk_score = loaded_model.decision_function(processed_df)[0]
 
-        # 4. SHAP 분석 및 근거 생성
-        base_model_pipeline = loaded_model.estimators_[0]
-        preprocessor = base_model_pipeline.named_steps['preprocessor']
-        classifier = base_model_pipeline.named_steps['classifier']
-        explainer = shap.TreeExplainer(classifier)
-        test_data_transformed = preprocessor.transform(processed_df)
-        transformed_feature_names = preprocessor.get_feature_names_out()
-        shap_values = explainer(test_data_transformed)
-
-        shap_instance_values = shap_values.values[0, :, 1]
-        df_shap = pd.DataFrame(shap_instance_values, index=transformed_feature_names, columns=['shap_value'])
-
-        original_numerical = ['채권최고액', '과거_매매가', '과거_전세가', '근저당권_개수', '압류_가압류_개수']
-        original_categorical = ['건축물_유형', '신탁_등기여부', '선순위_채권_존재여부', '전입_가능여부', '우선변제권_여부']
-
-        def get_original_feature_name(t_name):
-            parts = t_name.split('__')
-            if len(parts) > 1:
-                f_part = parts[1]
-                for c_name in original_categorical:
-                    if f_part.startswith(c_name): return c_name
-                if f_part in original_numerical: return f_part
-            return t_name
-
-        df_shap['feature_group'] = [get_original_feature_name(name) for name in df_shap.index]
-        shap_sum_by_feature = df_shap.groupby('feature_group')['shap_value'].sum()
-        risk_factors = shap_sum_by_feature[shap_sum_by_feature > 0].sort_values(ascending=False)
-        safe_factors = shap_sum_by_feature[shap_sum_by_feature < 0].sort_values()
-
-        analysis_summary = ""
-        if risk_probability >= 0.5:
-            analysis_summary += "이 등기부등본은 '위험'으로 예측됩니다.\\n"
-            if not risk_factors.empty:
-                top_risk = ", ".join([f"'{name}'" for name in risk_factors.head(2).index])
-                analysis_summary += f"주된 위험 요인은 {top_risk} 등입니다."
+        # 백분위 계산
+        if train_scores is not None:
+            risk_percentile = stats.percentileofscore(train_scores, risk_score)
         else:
-            analysis_summary += "이 등기부등본은 '안전'으로 예측됩니다.\\n"
-            if not safe_factors.empty:
-                top_safe = ", ".join([f"'{name}'" for name in safe_factors.head(2).index])
-                analysis_summary += f"주된 안전 요인은 {top_safe} 등입니다."
+            risk_percentile = "N/A"
 
-        os.remove(save_path)  # 임시 파일 삭제
+        # [ ✨ 핵심 수정 ✨ ] 4. 규칙 기반으로 분석 근거 생성
+        analysis_summary = generate_rule_based_summary(processed_df.iloc[0], prediction)
+
+        os.remove(save_path)
 
         # 5. 최종 결과 JSON으로 반환
         return jsonify({
             "prediction": "위험" if prediction == 1 else "안전",
-            "risk_probability": f"{risk_probability * 100:.2f}%",
+            "risk_score": f"{risk_score:.4f}",
+            "risk_probability": f"{risk_percentile:.2f}%" if isinstance(risk_percentile, float) else risk_percentile,
             "analysis_summary": analysis_summary,
-            "all_features": {k: str(v) for k, v in features_data.items()}  # 모든 피처 정보도 함께 반환
+            "all_features": {k: str(v) for k, v in features_data.items()}
         }), 200
 
     except Exception as e:
         app.logger.error(f"An error occurred: {e}")
+        # 임시 파일이 존재하면 삭제
+        if 'save_path' in locals() and os.path.exists(save_path):
+            os.remove(save_path)
         return jsonify({"error": "분석 중 오류가 발생했습니다.", "details": str(e)}), 500
 
 
