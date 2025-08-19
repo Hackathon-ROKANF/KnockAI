@@ -8,11 +8,10 @@ import pickle
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from scipy import stats  # [ ✨ 핵심 추가 ✨ ] 백분위 계산을 위해 추가
+from scipy import stats  # 백분위 계산을 위해 추가
 
 
 # --- 1. PDF 분석 로직 (기존과 동일) ---
-# (PDF 텍스트 추출 및 피처 파싱 함수들은 수정할 필요가 없으므로 그대로 둡니다)
 def korean_to_int(kstr):
     if not kstr: return 0
     kstr = str(kstr).replace(",", "").replace(" ", "").strip()
@@ -115,41 +114,44 @@ def parse_register_info_detailed(text):
     return features
 
 
-# --- 2. [ ✨ 핵심 수정 ✨ ] 모델 및 관련 데이터 로드 ---
+# --- 2. 모델 및 관련 데이터 로드 ---
 try:
     with open('real_estate_model.pkl', 'rb') as f:
         saved_model_data = pickle.load(f)
-
     loaded_model = saved_model_data['model']
     training_columns = saved_model_data['columns']
     training_dtypes = saved_model_data['dtypes']
-    train_scores = saved_model_data.get('train_scores')  # 백분위 계산을 위한 기준 점수표
+    train_scores = saved_model_data.get('train_scores')
     print("✅ 모델과 관련 데이터가 성공적으로 로드되었습니다.")
-
 except Exception as e:
     print(f"❌ 모델 로딩 실패: {e}")
     loaded_model = None
-    train_scores = None  # 로딩 실패 시 None으로 초기화
+    train_scores = None
 
 
-# --- 3. [ ✨ 핵심 추가 ✨ ] 규칙 기반 분석 로직 ---
+# --- 3. 분석 등급 및 요약 생성 함수 ---
+def get_risk_grade(risk_score, percentile):
+    if risk_score <= 0:
+        return "안전"
+    if percentile is None:
+        return "확인 필요"
+    if percentile < 33.3:
+        return "관심"
+    elif percentile < 66.6:
+        return "주의"
+    else:
+        return "위험"
 
-def generate_rule_based_summary(data_row, prediction_result):
-    """입력 데이터의 값을 바탕으로 위험/안전 요인을 찾아 문장으로 요약합니다."""
+
+def generate_rule_based_summary(data_row, final_grade):
     risk_factors = []
     safe_factors = []
 
-    # --- 위험 요인 규칙 ---
-    if data_row.get('우선변제권_여부') == False:
-        risk_factors.append("'우선변제권' 확보 불확실")
-    if data_row.get('선순위_채권_존재여부') == True:
-        risk_factors.append("'선순위 채권' 존재")
-    if data_row.get('압류_가압류_개수', 0) > 0:
-        risk_factors.append(f"'압류/가압류' ({int(data_row.get('압류_가압류_개수', 0))}건) 존재")
-    if data_row.get('신탁_등기여부') == True:
-        risk_factors.append("'신탁 등기' 존재")
-    if data_row.get('전입_가능여부') == False:
-        risk_factors.append("'전입 불가' 상태")
+    if data_row.get('우선변제권_여부') == False: risk_factors.append("'우선변제권' 확보 불확실")
+    if data_row.get('선순위_채권_존재여부') == True: risk_factors.append("'선순위 채권' 존재")
+    if data_row.get('압류_가압류_개수', 0) > 0: risk_factors.append(f"'압류/가압류' ({int(data_row.get('압류_가압류_개수', 0))}건) 존재")
+    if data_row.get('신탁_등기여부') == True: risk_factors.append("'신탁 등기' 존재")
+    if data_row.get('전입_가능여부') == False: risk_factors.append("'전입 불가' 상태")
 
     past_price = data_row.get('과거_매매가', 0)
     past_jeonse = data_row.get('과거_전세가', 0)
@@ -158,27 +160,18 @@ def generate_rule_based_summary(data_row, prediction_result):
         if jeonse_ratio > 80:
             risk_factors.append(f"높은 과거 전세가율 ({jeonse_ratio:.0f}%)")
 
-    # --- 안전 요인 규칙 ---
-    if not risk_factors:
-        safe_factors.append("등기부등본상 특이사항 없음")
-    if data_row.get('압류_가압류_개수', 0) == 0:
-        safe_factors.append("'압류/가압류' 없음")
+    if data_row.get('압류_가압류_개수', 0) == 0: safe_factors.append("'압류/가압류' 없음")
+    if not risk_factors: safe_factors.append("등기부등본상 특이사항 없음")
 
-    # --- [ ✨ 핵심 수정 ✨ ] 최종 요약 문장 생성 시 '\\n' 대신 띄어쓰기 사용 ---
-    summary_parts = []
-    if prediction_result == 1: # '위험'으로 예측된 경우
-        summary_parts.append("이 등기부등본은 '위험'으로 예측됩니다.")
+    summary_parts = [f"최종 분석 등급은 '{final_grade}'입니다."]
+    if final_grade != "안전" and risk_factors:
+        summary_parts.append(f"주된 위험 요인: {', '.join(risk_factors)}.")
+    elif final_grade == "안전" and safe_factors:
+        summary_parts.append(f"주된 안전 요인: {', '.join(safe_factors)}.")
         if risk_factors:
-            summary_parts.append(f"주된 위험 요인: {', '.join(risk_factors)}.")
+            summary_parts.append(f"다만, {', '.join(risk_factors)} 부분은 확인이 필요합니다.")
 
-    else: # '안전'으로 예측된 경우
-        summary_parts.append("이 등기부등본은 '안전'으로 예측됩니다.")
-        if safe_factors:
-            summary_parts.append(f"주된 안전 요인: {', '.join(safe_factors)}.")
-        if risk_factors:
-             summary_parts.append(f"주의할 요인: {', '.join(risk_factors)}.")
-
-    return " ".join(summary_parts) # 리스트의 각 부분을 띄어쓰기로 합쳐서 한 줄로 반환
+    return " ".join(summary_parts)
 
 
 # --- 4. Flask 서버 설정 ---
@@ -207,21 +200,19 @@ def analyze_pdf_endpoint():
     if file.filename == '' or not file.filename.endswith('.pdf'):
         return jsonify({"error": "PDF 파일이 아니거나 선택되지 않았습니다."}), 400
 
+    save_path = None
     try:
-        # 1. PDF 저장 및 피처 추출
         filename = secure_filename(file.filename)
         save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(save_path)
+
         pdf_text = extract_text_from_pdf(save_path)
+        if "등기사항전부증명서" not in pdf_text:
+            return jsonify({"error": "올바른 등기부등본 파일이 아닙니다."}), 400
+
         features_data = parse_register_info_detailed(pdf_text)
         test_df = pd.DataFrame([features_data])
 
-        # PDF 유효성 검사
-        if "등기사항전부증명서" not in pdf_text:
-            os.remove(save_path)
-            return jsonify({"error": "올바른 등기부등본 파일이 아닙니다."}), 400
-
-        # 2. 예측을 위한 데이터 전처리
         processed_df = pd.DataFrame(columns=training_columns, index=test_df.index)
         common_cols = [col for col in test_df.columns if col in processed_df.columns]
         processed_df[common_cols] = test_df[common_cols]
@@ -236,24 +227,18 @@ def analyze_pdf_endpoint():
                             {'true': True, 'false': False, 'nan': pd.NA}
                         ).astype('boolean')
 
-        # [ ✨ 핵심 수정 ✨ ] 3. One-Class SVM으로 예측 수행
-        prediction = loaded_model.predict(processed_df)[0]  # 1 또는 -1 반환
         risk_score = loaded_model.decision_function(processed_df)[0]
 
-        # 백분위 계산
+        risk_percentile = "N/A"
         if train_scores is not None:
             risk_percentile = stats.percentileofscore(train_scores, risk_score)
-        else:
-            risk_percentile = "N/A"
 
-        # [ ✨ 핵심 수정 ✨ ] 4. 규칙 기반으로 분석 근거 생성
-        analysis_summary = generate_rule_based_summary(processed_df.iloc[0], prediction)
+        final_grade = get_risk_grade(risk_score, risk_percentile if risk_percentile != "N/A" else None)
 
-        os.remove(save_path)
+        analysis_summary = generate_rule_based_summary(processed_df.iloc[0], final_grade)
 
-        # 5. 최종 결과 JSON으로 반환
         return jsonify({
-            "prediction": "위험" if prediction == 1 else "안전",
+            "prediction": final_grade,
             "risk_score": f"{risk_score:.4f}",
             "risk_probability": f"{risk_percentile:.2f}%" if isinstance(risk_percentile, float) else risk_percentile,
             "analysis_summary": analysis_summary,
@@ -262,10 +247,10 @@ def analyze_pdf_endpoint():
 
     except Exception as e:
         app.logger.error(f"An error occurred: {e}")
-        # 임시 파일이 존재하면 삭제
-        if 'save_path' in locals() and os.path.exists(save_path):
-            os.remove(save_path)
         return jsonify({"error": "분석 중 오류가 발생했습니다.", "details": str(e)}), 500
+    finally:
+        if save_path and os.path.exists(save_path):
+            os.remove(save_path)
 
 
 if __name__ == '__main__':
