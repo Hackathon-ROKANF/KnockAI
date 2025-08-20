@@ -6,3 +6,4 @@ numpy
 scikit-learn
 shap
 gunicorn
+openai
