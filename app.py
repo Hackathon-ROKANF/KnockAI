@@ -48,28 +48,68 @@ def parse_register_info_detailed(text):
         '전입_가능여부': True, '우선변제권_여부': True, '주소': None, '전세가': None,
         '매매가': None, '전세가율': None, '과거_매매가': None, '과거_전세가': None, '과거_전세가율': None,
     }
+
     addr_match = re.search(r'\[\s*(?:건물|집합건물)\s*\]\s*(.+?)\n', text)
     if addr_match: features['주소'] = addr_match.group(1).strip()
+
     building_type_list = ['아파트', '빌라', '오피스텔', '다세대주택', '단독주택', '연립주택', '다가구주택']
     features['건축물_유형'] = '기타'
     for b_type in building_type_list:
         if b_type in text:
             features['건축물_유형'] = b_type
             break
+
+    # --- [ ✨ 핵심 수정 ✨ ] 갑구 분석 로직 전면 개선 ---
     gapgu_section_match = re.search(r'【\s*갑\s*구\s*】([\s\S]+?)(?=【\s*을\s*구\s*】|--\s*이\s*하\s*여\s*백\s*--)', text)
     if gapgu_section_match:
         gapgu_section = gapgu_section_match.group(1)
+
+        trusts = {}
+        # 등기목적, 등기원인 등 상세정보를 포함하여 파싱
+        gapgu_entries = re.finditer(
+            r'(?P<num>\d+(?:-\d+)?)\n(?P<purpose>[\s\S]+?)\n(?P<receipt>.+?)\n(?P<cause>[\s\S]+?)\n(?P<details>[\s\S]+?)(?=\n\d+(?:-\d+)?\s|\Z)',
+            gapgu_section)
+
+        for entry in gapgu_entries:
+            entry_dict = entry.groupdict()
+            num = entry_dict['num'].strip()
+            purpose = entry_dict['purpose'].strip()
+            cause = entry_dict['cause'].strip()
+            details = entry_dict['details'].strip()
+            full_entry_text = entry.group(0)  # 해당 등기 항목 전체 텍스트
+
+            # 1. 말소/귀속 등 신탁 해지 사유를 먼저 확인
+            if '신탁등기말소' in purpose or '신탁재산의 귀속' in cause:
+                target_nums = re.findall(r'(\d+)번', full_entry_text)
+                for target_num in target_nums:
+                    if target_num in trusts:
+                        trusts[target_num]['active'] = False
+
+            # 2. 신탁 설정 등기 확인 (말소/귀속이 아닌 경우)
+            elif '소유권이전' in purpose and '신탁' in cause:
+                trusts[num] = {'active': True}
+
+        active_trusts_count = sum(1 for t in trusts.values() if t.get('active'))
+        if active_trusts_count > 0:
+            features['신탁_등기여부'] = True
+
         trade_prices = re.findall(r"거래가액\s*금([일이삼사오육칠팔구십백천만억조\d,\s]+)(?:원|정)", gapgu_section)
-        if trade_prices: features['과거_매매가'] = korean_to_int(trade_prices[-1])
-        seizures_list = re.findall(r"가압류|압류", gapgu_section)
+        if trade_prices:
+            features['과거_매매가'] = korean_to_int(trade_prices[-1])
+
+        seizures_list = re.findall(r"가압류|압류|경매개시결정", gapgu_section)
         features['압류_가압류_개수'] = len(seizures_list)
+
+    # --- 을구 분석 로직 (기존과 동일) ---
     eulgu_section_match = re.search(r'【\s*을\s*구\s*】([\s\S]+?)(?=--\s*이\s*하\s*여\s*백\s*--|$)', text)
     if eulgu_section_match:
+        # (을구 분석 로직은 이전과 동일하므로 생략)
         eulgu_section = eulgu_section_match.group(1)
         entries_text = re.split(r'\n(?=\d+(?:-\d+)?\s)', eulgu_section)
         mortgages, leases = {}, {}
         for entry_text in entries_text[1:]:
-            entry_text = entry_text.strip()
+            # ... (이하 근저당권, 전세권 분석 로직은 기존과 동일)
+            entry_text = entry_text.strip();
             if not entry_text: continue
             num_match = re.match(r'(\d+(?:-\d+)?)', entry_text)
             if not num_match: continue
@@ -97,20 +137,34 @@ def parse_register_info_detailed(text):
                 if main_num in mortgages:
                     amount_match = re.search(r"채권최고액\s*금\s*([일이삼사오육칠팔구십백천만억조\d,\s]+)원", content)
                     if amount_match: mortgages[main_num]['amount'] = korean_to_int(amount_match.group(1))
+
         active_mortgages = [m for m in mortgages.values() if m.get('active')]
         features['근저당권_개수'] = len(active_mortgages)
         if active_mortgages:
             features['채권최고액'] = sum(m['amount'] for m in active_mortgages)
             features['근저당권_설정일_최근'] = max(m['date'] for m in active_mortgages).strftime('%Y-%m-%d')
+
         active_leases = [l for l in leases.values() if l.get('active')]
-        if active_leases: features['과거_전세가'] = active_leases[-1]['amount']
-    if '신탁원부' in text or '신탁등기' in text: features['신탁_등기여부'] = True
-    if features['근저당권_개수'] > 0 or features['압류_가압류_개수'] > 0: features['선순위_채권_존재여부'] = True
-    if '경매개시결정' in text or '주택임차권' in text: features['전입_가능여부'] = False
-    if features['선순위_채권_존재여부'] or not features['전입_가능여부']: features['우선변제권_여부'] = False
+        if active_leases:
+            features['과거_전세가'] = active_leases[-1]['amount']
+
+    # --- 최종 피처 계산 ---
+    if features['근저당권_개수'] > 0 or features['압류_가압류_개수'] > 0 or features['신탁_등기여부']:
+        features['선순위_채권_존재여부'] = True
+
+    if features['압류_가압류_개수'] > 0 or '주택임차권' in text:
+        features['전입_가능여부'] = False
+
+    if features['선순위_채권_존재여부'] or not features['전입_가능여부']:
+        features['우선변제권_여부'] = False
+
     if features.get('과거_매매가') and features.get('과거_전세가'):
-        ratio = (features['과거_전세가'] / features['과거_매매가']) * 100
-        features['과거_전세가율'] = f"{ratio:.2f}%"
+        try:
+            ratio = (features['과거_전세가'] / features['과거_매매가']) * 100
+            features['과거_전세가율'] = f"{ratio:.2f}%"
+        except (TypeError, ZeroDivisionError):
+            features['과거_전세가율'] = None
+
     return features
 
 
