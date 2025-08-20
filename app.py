@@ -261,14 +261,28 @@ def analyze_pdf_endpoint():
     if file.filename == '' or not file.filename.endswith('.pdf'):
         return jsonify({"error": "PDF 파일이 아니거나 선택되지 않았습니다."}), 400
 
-    save_path = None
     try:
-        filename = secure_filename(file.filename)
-        save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        # --- ✨ [수정 1] 체계적인 저장을 위한 경로 및 파일명 생성 ---
+
+        # 1. 오늘 날짜로 폴더 경로 생성 (예: uploads/2025/08/20)
+        today = datetime.now()
+        date_path = os.path.join(app.config['UPLOAD_FOLDER'], today.strftime('%Y/%m/%d'))
+        os.makedirs(date_path, exist_ok=True)  # exist_ok=True는 폴더가 이미 있어도 오류를 내지 않음
+
+        # 2. 고유한 파일명 생성 (예: 150730_등기부등본.pdf)
+        original_filename = secure_filename(file.filename)
+        timestamp = today.strftime('%H%M%S')
+        unique_filename = f"{timestamp}_{original_filename}"
+
+        # 3. 최종 저장 경로 설정
+        save_path = os.path.join(date_path, unique_filename)
         file.save(save_path)
 
         pdf_text = extract_text_from_pdf(save_path)
         if "등기사항전부증명서" not in pdf_text:
+            # ✨ [수정 2] 유효하지 않은 파일이면 즉시 삭제
+            if os.path.exists(save_path):
+                os.remove(save_path)
             return jsonify({"error": "올바른 등기부등본 파일이 아닙니다."}), 400
 
         features_data = parse_register_info_detailed(pdf_text)
@@ -343,20 +357,27 @@ def analyze_pdf_endpoint():
         )
         analysis_summary = response.choices[0].message.content.strip()
 
-        return jsonify({
+        response_data = {
             "prediction": final_grade,
             "risk_score": f"{risk_score:.4f}",
             "risk_probability": f"{risk_percentile:.2f}%" if isinstance(risk_percentile, float) else risk_percentile,
             "analysis_summary": analysis_summary,
             "all_features": {k: str(v) for k, v in features_data.items()}
-        }), 200
+        }
+
+        # PDF와 같은 이름으로 .json 확장자로 저장
+        json_save_path = os.path.splitext(save_path)[0] + ".json"
+        with open(json_save_path, 'w', encoding='utf-8') as f:
+            json.dump(response_data, f, ensure_ascii=False, indent=4)
+
+        return jsonify(response_data), 200
 
     except Exception as e:
         app.logger.error(f"An error occurred: {e}")
         return jsonify({"error": "분석 중 오류가 발생했습니다.", "details": str(e)}), 500
-    finally:
-        if save_path and os.path.exists(save_path):
-            os.remove(save_path)
+    # finally:
+    #     if save_path and os.path.exists(save_path):
+    #         os.remove(save_path)
 
 
 if __name__ == '__main__':
