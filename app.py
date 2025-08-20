@@ -3,12 +3,19 @@ import re
 import fitz  # PyMuPDF
 from datetime import datetime
 import pandas as pd
+import json
 import numpy as np
 import pickle
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from scipy import stats  # 백분위 계산을 위해 추가
+import openai
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+if not openai.api_key:
+    print("❌ [경고] OPENAI_API_KEY 환경 변수가 설정되지 않았습니다. API 호출이 실패합니다.")
 
 
 # --- 1. PDF 분석 로직 (기존과 동일) ---
@@ -197,35 +204,35 @@ def get_risk_grade(risk_score, percentile):
         return "위험"
 
 
-def generate_rule_based_summary(data_row, final_grade):
-    risk_factors = []
-    safe_factors = []
-
-    if data_row.get('우선변제권_여부') == False: risk_factors.append("'우선변제권' 확보 불확실")
-    if data_row.get('선순위_채권_존재여부') == True: risk_factors.append("'선순위 채권' 존재")
-    if data_row.get('압류_가압류_개수', 0) > 0: risk_factors.append(f"'압류/가압류' ({int(data_row.get('압류_가압류_개수', 0))}건) 존재")
-    if data_row.get('신탁_등기여부') == True: risk_factors.append("'신탁 등기' 존재")
-    if data_row.get('전입_가능여부') == False: risk_factors.append("'전입 불가' 상태")
-
-    past_price = data_row.get('과거_매매가', 0)
-    past_jeonse = data_row.get('과거_전세가', 0)
-    if past_price > 0 and past_jeonse > 0:
-        jeonse_ratio = (past_jeonse / past_price) * 100
-        if jeonse_ratio > 80:
-            risk_factors.append(f"높은 과거 전세가율 ({jeonse_ratio:.0f}%)")
-
-    if data_row.get('압류_가압류_개수', 0) == 0: safe_factors.append("'압류/가압류' 없음")
-    if not risk_factors: safe_factors.append("등기부등본상 특이사항 없음")
-
-    summary_parts = [f"최종 분석 등급은 '{final_grade}'입니다."]
-    if final_grade != "안전" and risk_factors:
-        summary_parts.append(f"주된 위험 요인: {', '.join(risk_factors)}.")
-    elif final_grade == "안전" and safe_factors:
-        summary_parts.append(f"주된 안전 요인: {', '.join(safe_factors)}.")
-        if risk_factors:
-            summary_parts.append(f"다만, {', '.join(risk_factors)} 부분은 확인이 필요합니다.")
-
-    return " ".join(summary_parts)
+# def generate_rule_based_summary(data_row, final_grade):
+#     risk_factors = []
+#     safe_factors = []
+#
+#     if data_row.get('우선변제권_여부') == False: risk_factors.append("'우선변제권' 확보 불확실")
+#     if data_row.get('선순위_채권_존재여부') == True: risk_factors.append("'선순위 채권' 존재")
+#     if data_row.get('압류_가압류_개수', 0) > 0: risk_factors.append(f"'압류/가압류' ({int(data_row.get('압류_가압류_개수', 0))}건) 존재")
+#     if data_row.get('신탁_등기여부') == True: risk_factors.append("'신탁 등기' 존재")
+#     if data_row.get('전입_가능여부') == False: risk_factors.append("'전입 불가' 상태")
+#
+#     past_price = data_row.get('과거_매매가', 0)
+#     past_jeonse = data_row.get('과거_전세가', 0)
+#     if past_price > 0 and past_jeonse > 0:
+#         jeonse_ratio = (past_jeonse / past_price) * 100
+#         if jeonse_ratio > 80:
+#             risk_factors.append(f"높은 과거 전세가율 ({jeonse_ratio:.0f}%)")
+#
+#     if data_row.get('압류_가압류_개수', 0) == 0: safe_factors.append("'압류/가압류' 없음")
+#     if not risk_factors: safe_factors.append("등기부등본상 특이사항 없음")
+#
+#     summary_parts = [f"최종 분석 등급은 '{final_grade}'입니다."]
+#     if final_grade != "안전" and risk_factors:
+#         summary_parts.append(f"주된 위험 요인: {', '.join(risk_factors)}.")
+#     elif final_grade == "안전" and safe_factors:
+#         summary_parts.append(f"주된 안전 요인: {', '.join(safe_factors)}.")
+#         if risk_factors:
+#             summary_parts.append(f"다만, {', '.join(risk_factors)} 부분은 확인이 필요합니다.")
+#
+#     return " ".join(summary_parts)
 
 
 # --- 4. Flask 서버 설정 ---
@@ -289,7 +296,52 @@ def analyze_pdf_endpoint():
 
         final_grade = get_risk_grade(risk_score, risk_percentile if risk_percentile != "N/A" else None)
 
-        analysis_summary = generate_rule_based_summary(processed_df.iloc[0], final_grade)
+        # [ ✨ 핵심 수정 ✨ ] 규칙 기반 함수 대신 OpenAI API 호출로 변경
+
+        # 4-1. AI에게 전달할 데이터 정리
+        #      processed_df는 AI가 이해하기 어려운 숫자이므로, 원본 features_data를 사용
+        analysis_data = {
+            "최종 분석 등급": final_grade,
+            "위험도 점수": f"{risk_score:.2f}",
+            "위험 백분위(%)": f"{risk_percentile:.2f}" if isinstance(risk_percentile, float) else "N/A",
+            "주요 등기 정보": {
+                "선순위 채권 존재 여부": features_data['선순위_채권_존재여부'],
+                "압류/가압류 개수": features_data['압류_가압류_개수'],
+                "근저당권 개수": features_data['근저당권_개수'],
+                "신탁 등기 여부": features_data['신탁_등기여부'],
+                "전입 가능 여부": features_data['전입_가능여부'],
+                "우선변제권 확보 여부": features_data['우선변제권_여부'],
+                "과거 전세가율": features_data.get('과거_전세가율', 'N/A')
+            }
+        }
+
+        # 4-2. 프롬프트 생성
+        prompt = f"""
+                당신은 부동산 등기부등본 분석 결과를 일반인 사용자에게 설명해주는 AI 전문가입니다.
+                아래는 분석된 등기부등본의 핵심 데이터입니다.
+
+                데이터:
+                {json.dumps(analysis_data, indent=2, ensure_ascii=False)}
+
+                임무:
+                1. 위 데이터를 바탕으로, 최종 분석 등급에 대한 이유를 설명하는 '분석 요약'을 생성하세요.
+                2. 위험 요인과 안전 요인을 명확히 짚어주되, 각 요인이 왜 중요한지 구체적인 설명을 포함하여 작성하세요.
+                3. 모든 내용을 종합하여 각 정보별로 같은 형식을 유지하며 한줄로 요약하세요.
+                4. 분석 요약은 다음 형식을 따르세요: 번호. 등급(있다면) - 내용
+                5. 줄바꿈은 전혀 없이 작성하세요. 
+                """
+
+        # 4-3. OpenAI API 호출
+        response = openai.chat.completions.create(
+            model="gpt-4o",  # 또는 "gpt-3.5-turbo"
+            messages=[
+                {"role": "system", "content": "당신은 부동산 등기부등본 분석 전문가입니다."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,  # 일관된 결과물을 위해 온도를 낮게 설정
+            max_tokens=300
+        )
+        analysis_summary = response.choices[0].message.content.strip()
 
         return jsonify({
             "prediction": final_grade,
