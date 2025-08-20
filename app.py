@@ -353,7 +353,7 @@ def analyze_pdf_endpoint():
                 {"role": "user", "content": prompt}
             ],
             temperature=0.4,  # 일관된 결과물을 위해 온도를 낮게 설정
-            max_tokens=300
+            max_tokens=400
         )
         analysis_summary = response.choices[0].message.content.strip()
 
