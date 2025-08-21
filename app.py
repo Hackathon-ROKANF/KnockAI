@@ -66,46 +66,57 @@ def parse_register_info_detailed(text):
             features['건축물_유형'] = b_type
             break
 
-    # --- [ ✨ 핵심 수정 ✨ ] 갑구 분석 로직 전면 개선 ---
     gapgu_section_match = re.search(r'【\s*갑\s*구\s*】([\s\S]+?)(?=【\s*을\s*구\s*】|--\s*이\s*하\s*여\s*백\s*--)', text)
     if gapgu_section_match:
         gapgu_section = gapgu_section_match.group(1)
 
+        # --- ✨ [핵심 수정] 신탁 및 압류/가압류 분석 로직 개선 ---
         trusts = {}
-        # 등기목적, 등기원인 등 상세정보를 포함하여 파싱
-        gapgu_entries = re.finditer(
-            r'(?P<num>\d+(?:-\d+)?)\n(?P<purpose>[\s\S]+?)\n(?P<receipt>.+?)\n(?P<cause>[\s\S]+?)\n(?P<details>[\s\S]+?)(?=\n\d+(?:-\d+)?\s|\Z)',
-            gapgu_section)
+        seizures = {}  # 압류/가압류 상태 추적을 위한 딕셔너리
 
-        for entry in gapgu_entries:
-            entry_dict = entry.groupdict()
-            num = entry_dict['num'].strip()
-            purpose = entry_dict['purpose'].strip()
-            cause = entry_dict['cause'].strip()
-            details = entry_dict['details'].strip()
-            full_entry_text = entry.group(0)  # 해당 등기 항목 전체 텍스트
+        # 순위번호를 기준으로 갑구의 내용을 분리
+        gapgu_entries = re.split(r'\n(?=\d+\s)', gapgu_section)
 
-            # 1. 말소/귀속 등 신탁 해지 사유를 먼저 확인
-            if '신탁등기말소' in purpose or '신탁재산의 귀속' in cause:
-                target_nums = re.findall(r'(\d+)번', full_entry_text)
+        for entry_text in gapgu_entries:
+            entry_text = entry_text.strip()
+            if not entry_text: continue
+
+            num_match = re.match(r'(\d+)', entry_text)
+            if not num_match: continue
+            num = num_match.group(1)
+            content = entry_text[len(num):].strip()
+
+            # 1. 말소 등기 처리 (신탁, 압류 모두에 적용)
+            if '말소' in content:
+                # '3번압류, 4번임의경매개시결정 등기말소' 와 같은 형식에서 숫자 추출
+                target_nums = re.findall(r'(\d+)번', content)
                 for target_num in target_nums:
                     if target_num in trusts:
                         trusts[target_num]['active'] = False
+                    if target_num in seizures:
+                        seizures[target_num]['active'] = False
+                continue  # 말소 등기는 다른 등기 목적을 가지지 않으므로 다음 항목으로 넘어감
 
-            # 2. 신탁 설정 등기 확인 (말소/귀속이 아닌 경우)
-            elif '소유권이전' in purpose and '신탁' in cause:
+            # 2. 신탁 등기 처리
+            if '소유권이전' in content and '신탁' in content:
                 trusts[num] = {'active': True}
 
+            # 3. 압류, 가압류, 경매 등기 처리
+            if any(keyword in content for keyword in ['압류', '가압류', '경매개시결정']):
+                seizures[num] = {'active': True}
+
+        # 활성화된 신탁 및 압류/가압류 개수 계산
         active_trusts_count = sum(1 for t in trusts.values() if t.get('active'))
         if active_trusts_count > 0:
             features['신탁_등기여부'] = True
 
+        active_seizures_count = sum(1 for s in seizures.values() if s.get('active'))
+        features['압류_가압류_개수'] = active_seizures_count
+        # --- 수정 완료 ---
+
         trade_prices = re.findall(r"거래가액\s*금([일이삼사오육칠팔구십백천만억조\d,\s]+)(?:원|정)", gapgu_section)
         if trade_prices:
             features['과거_매매가'] = korean_to_int(trade_prices[-1])
-
-        seizures_list = re.findall(r"가압류|압류|경매개시결정", gapgu_section)
-        features['압류_가압류_개수'] = len(seizures_list)
 
     # --- 을구 분석 로직 (기존과 동일) ---
     eulgu_section_match = re.search(r'【\s*을\s*구\s*】([\s\S]+?)(?=--\s*이\s*하\s*여\s*백\s*--|$)', text)
