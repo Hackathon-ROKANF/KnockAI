@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import fitz  # PyMuPDF
 from datetime import datetime
 import pandas as pd
@@ -47,6 +48,27 @@ def extract_text_from_pdf(pdf_path):
         for page in doc: text += page.get_text()
     return text
 
+def summary_to_json(summary_text):
+    # 항목별로 분리
+    items = re.split(r'\d+\.\s*', summary_text)
+    result = {}
+    for item in items:
+        item = item.strip()
+        if not item: continue
+        # 키와 값 분리 (예: '관심 - 내용', '위험 요인 - 내용')
+        match = re.match(r"([^\-:]+)[\-\:]\s*(.+)", item)
+        if match:
+            key = match.group(1).strip()
+            value = match.group(2).strip()
+            # 중복 키는 리스트로 묶음
+            if key in result:
+                if isinstance(result[key], list):
+                    result[key].append(value)
+                else:
+                    result[key] = [result[key], value]
+            else:
+                result[key] = value
+    return result
 
 def parse_register_info_detailed(text):
     features = {
@@ -255,7 +277,6 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-
 @app.route('/')
 def health_check():
     return "✅ Knock AI (One-Class SVM) 서버가 정상적으로 실행 중입니다!"
@@ -341,22 +362,19 @@ def analyze_pdf_endpoint():
         }
 
         # 4-2. 프롬프트 생성
-        prompt = f"""
-                당신은 부동산 등기부등본 분석 결과를 일반인 사용자에게 설명해주는 AI 전문가입니다.
-                아래는 분석된 등기부등본의 핵심 데이터입니다.
-
-                데이터:
-                {json.dumps(analysis_data, indent=2, ensure_ascii=False)}
-
-                임무:
-                1. 위 데이터를 바탕으로, 최종 분석 등급에 대한 이유를 설명하는 '분석 요약'을 생성하세요.
-                2. 위험 요인과 안전 요인을 명확히 짚어주되, 각 요인이 왜 중요한지 구체적인 설명을 포함하여 작성하세요.
-                3. 위험 요인은 위험 요인끼리, 안전 요인은 안전 요인끼리 묶어서 설명하세요.
-                4. 모든 내용을 종합하여 각 정보별로 같은 형식을 유지하며 한줄로 요약하세요.
-                5. 분석 요약은 다음 형식을 따르세요: 번호. 등급(있다면) : 내용
-                6. 줄바꿈은 전혀 없이 작성하세요. 
-                7. 마지막 항목은 등기부등본에 포함된 매매가, 전세가, 전세가율을 JSON 형식 (예시) 매매가 : 200000000, 전세가 : 150000000 으로 명시하세요.
-                """
+        prompt = (
+            "당신은 부동산 등기부등본 분석 결과를 일반인 사용자에게 설명해주는 AI 전문가입니다. "
+            "아래는 분석된 등기부등본의 핵심 데이터입니다.\n"
+            f"데이터: {json.dumps(analysis_data, ensure_ascii=False)}\n"
+            "임무:\n"
+            "1. 위 데이터를 바탕으로, 최종 분석 등급에 대한 이유를 설명하는 '분석 요약'을 생성하세요.\n"
+            "2. 위험 요인과 안전 요인을 합쳐서 6개 혹은 7개로 명확히 짚어주되, 각 요인이 왜 중요한지 구체적인 설명을 포함하여 작성하세요.\n"
+            "3. 위험 요인은 위험 요인끼리, 안전 요인은 안전 요인끼리 묶어서 설명하세요.\n"
+            "4. 모든 내용을 종합하여 각 정보별로 같은 형식을 유지하며 한줄로 요약하세요.\n"
+            "5. 분석 요약은 반드시 아래 예시처럼 JSON 형식(key-value 쌍)으로만 출력하세요. 동일한 요인이 여러 개일 경우 반드시 리스트로 묶어서 출력하세요. 예시: {\"관심\": \"최종 분석 등급이 '관심'인 이유는 ...\", \"위험 요인\": [\"...\", \"...\"], \"안전 요인\": [\"...\", \"...\"]}\n"
+            "6. 순서는 최종 분석 등급이 가장 앞에 오도록 하고, 위험 요인과 안전 요인은 그 다음에 오도록 하세요.\n"
+            "7. 줄바꿈 없이 한 줄로만 출력하세요.\n"
+        )
 
         # 4-3. OpenAI API 호출
         response = openai.chat.completions.create(
@@ -369,12 +387,16 @@ def analyze_pdf_endpoint():
             max_tokens=400
         )
         analysis_summary = response.choices[0].message.content.strip()
+        try:
+            json_data = json.loads(analysis_summary)
+        except Exception as e:
+            json_data = {"error": "AI 응답을 JSON으로 변환하지 못했습니다.", "raw": analysis_summary}
 
         response_data = {
             "prediction": final_grade,
             "risk_score": f"{risk_score:.4f}",
             "risk_probability": f"{risk_percentile:.2f}%" if isinstance(risk_percentile, float) else risk_percentile,
-            "analysis_summary": analysis_summary,
+            "analysis_summary": json_data,
             "all_features": {k: str(v) for k, v in features_data.items()}
         }
 
