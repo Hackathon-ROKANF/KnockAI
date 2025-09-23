@@ -1,19 +1,34 @@
 # pdf_processor.py
 import re
 import fitz  # PyMuPDF
+import logging
 from datetime import datetime
 from utils import korean_to_int
 
+# --- ✨ 커스텀 예외 클래스 정의 ---
+class PDFProcessingError(Exception):
+    """PDF 처리 중 발생하는 오류를 위한 커스텀 예외"""
+    pass
+
 def extract_text_from_pdf(pdf_path):
-    """PDF 파일 경로를 받아 텍스트를 추출합니다."""
-    text = ""
-    with fitz.open(pdf_path) as doc:
-        for page in doc:
-            text += page.get_text()
-    return text
+    """PDF 파일 경로를 받아 텍스트를 추출하고, 실패 시 PDFProcessingError를 발생시킵니다."""
+    try:
+        text = ""
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                text += page.get_text()
+        if not text.strip():
+            raise PDFProcessingError("PDF에서 텍스트를 추출할 수 없습니다. 빈 파일이거나 이미지로만 구성되어 있을 수 있습니다.")
+        return text
+    except Exception as e:
+        # fitz 라이브러리 오류 또는 기타 예외를 잡아 커스텀 예외로 변환
+        logging.error(f"fitz 라이브러리 오류 발생: {e}")
+        raise PDFProcessingError(f"PDF 파일을 열거나 읽는 중 오류가 발생했습니다: {e}")
+
 
 def parse_register_info_detailed(text):
     """추출된 텍스트에서 등기부등본의 상세 정보를 파싱합니다."""
+    # (기존 파싱 로직은 동일하게 유지)
     features = {
         '건축물_유형': None, '근저당권_개수': 0, '채권최고액': 0, '근저당권_설정일_최근': None,
         '신탁_등기여부': False, '압류_가압류_개수': 0, '선순위_채권_존재여부': False,
