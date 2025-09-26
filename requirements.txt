@@ -9,3 +9,6 @@ gunicorn
 openai
 PyJWT
 python-dotenv
+PyMySQL
+Flask-SQLAlchemy
+Flask-Migrate
