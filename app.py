@@ -2,8 +2,12 @@
 import os
 import json
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
@@ -12,12 +16,29 @@ import config
 from pdf_processor import extract_text_from_pdf, parse_register_info_detailed, PDFProcessingError
 from risk_analyzer import load_model, analyze_risk, ModelAnalysisError
 from summary_generator import generate_summary
+from models import db, AnalysisResult
 
 # --- 로깅 설정 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def custom_serializer(*args, **kwargs):
+    """ensure_ascii=False를 기본값으로 사용하는 커스텀 JSON 직렬 변환기"""
+    kwargs['ensure_ascii'] = False
+    return json.dumps(*args, **kwargs)
+
 # Flask 앱 초기화
 app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False  # 한글 깨짐 방지
+# --- 🔽 DB 설정 로드 🔽 ---
+app.config.from_object(config)
+
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'json_serializer': custom_serializer
+}
+
+# --- 🔽 DB 초기화 🔽 ---
+db.init_app(app)
+
 CORS(app, resources={r"/api/analyze": {"origins": "*"}})
 
 # 업로드 폴더 설정
@@ -94,12 +115,26 @@ def analyze_pdf_endpoint():
             "all_features": {k: str(v) for k, v in features_data.items()}
         }
 
+        # DB에 결과 저장
+        new_result = AnalysisResult(
+            prediction=final_grade,
+            risk_score=risk_score,
+            risk_probability=f"{risk_percentile:.2f}%" if isinstance(risk_percentile, float) else risk_percentile,
+            summary_json=analysis_summary,
+            features_json={k: str(v) for k, v in features_data.items()},
+            file_path=save_path
+        )
+        db.session.add(new_result)
+        db.session.commit()
+
         # 6. 분석 결과 저장
         json_save_path = os.path.splitext(save_path)[0] + ".json"
         with open(json_save_path, 'w', encoding='utf-8') as f:
             json.dump(response_data, f, ensure_ascii=False, indent=4)
 
-        return jsonify(response_data), 200
+        # ✨ 새로운 코드: 직접 JSON 응답 생성
+        json_response = json.dumps(response_data, ensure_ascii=False, indent=4)
+        return Response(json_response, content_type='application/json; charset=utf-8'), 200
 
     # ✨ 각 모듈에서 발생시킨 커스텀 예외를 잡아 구체적인 오류 메시지 반환
     except PDFProcessingError as e:
