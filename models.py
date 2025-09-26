@@ -18,8 +18,10 @@ class AnalysisResult(db.Model):
     risk_probability = db.Column(db.String(50))
     summary_json = db.Column(db.JSON) # 분석 요약 JSON
     features_json = db.Column(db.JSON) # 전체 특징 JSON
+    user_id = db.Column(db.String(255), nullable=False)
     file_path = db.Column(db.String(255)) # 원본 파일 경로
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 
     def __repr__(self):
         return f"<AnalysisResult id={self.id} prediction='{self.prediction}'>"
