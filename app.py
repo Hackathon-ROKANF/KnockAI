@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import jwt
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,6 +11,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+from functools import wraps
 
 # 모듈화된 기능들 임포트
 import config
@@ -17,6 +19,32 @@ from pdf_processor import extract_text_from_pdf, parse_register_info_detailed, P
 from risk_analyzer import load_model, analyze_risk, ModelAnalysisError
 from summary_generator import generate_summary
 from models import db, AnalysisResult
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-default-secret-key")
+
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            # Bearer 토큰 형식 "Bearer <token>"
+            token = request.headers['Authorization'].split(" ")[1]
+
+        if not token:
+            return jsonify({'message': '토큰이 존재하지 않습니다.'}), 401
+
+        try:
+            data = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+            current_user_id = data['sub']
+        except jwt.ExpiredSignatureError:
+            return jsonify({'message': '토큰이 만료되었습니다.'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'message': '유효하지 않은 토큰입니다.'}), 401
+
+        return f(current_user_id, *args, **kwargs)
+
+    return decorated
 
 # --- 로깅 설정 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -67,7 +95,8 @@ def health_check():
 
 
 @app.route('/api/analyze', methods=['POST'])
-def analyze_pdf_endpoint():
+@token_required
+def analyze_pdf_endpoint(current_user_id):
     """PDF 파일 분석 API 엔드포인트"""
     if not model_data:
         logging.error("모델 데이터가 로드되지 않아 분석 요청을 처리할 수 없습니다.")
@@ -122,7 +151,8 @@ def analyze_pdf_endpoint():
             risk_probability=f"{risk_percentile:.2f}%" if isinstance(risk_percentile, float) else risk_percentile,
             summary_json=analysis_summary,
             features_json={k: str(v) for k, v in features_data.items()},
-            file_path=save_path
+            file_path=save_path,
+            user_id=current_user_id
         )
         db.session.add(new_result)
         db.session.commit()
