@@ -8,3 +8,4 @@ shap
 gunicorn
 openai
 PyJWT
+python-dotenv
