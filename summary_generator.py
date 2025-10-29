@@ -46,7 +46,7 @@ def generate_summary(features_data, final_grade, risk_score, risk_percentile):
                 {"role": "system", "content": "당신은 부동산 등기부등본 분석 전문가입니다."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.4,
+            temperature=0.1,
             max_tokens=400
         )
         analysis_summary = response.choices[0].message.content.strip()
